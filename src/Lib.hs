@@ -21,7 +21,7 @@ import Text.Parsec
 import Text.Parsec.String
 
 printZone :: Zone -> String
-printZone (Zone mtl records) = unlines formattedLines
+printZone (Zone mtl records) = intercalate "\n" formattedLines
   where headers  Nothing  = []
         headers (Just tl) = [unwords ["$TTL", show tl]]
         formattedLines = headers mtl ++ map (prettyShow indent) records
