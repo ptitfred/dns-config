@@ -12,8 +12,10 @@ module Lib
     , ofType
     ) where
 
-import Data.Char  (isSpace)
-import Data.Maybe (catMaybes)
+import Control.Monad (guard)
+import Data.Char     (isSpace)
+import Data.List     (intercalate)
+import Data.Maybe    (catMaybes)
 
 import Text.Parsec
 import Text.Parsec.String
@@ -64,12 +66,22 @@ data Record = Explicit RecordName RecordType RecordValue (Maybe TTL) (Maybe Clas
             | Continuation RecordType RecordValue (Maybe TTL) (Maybe Class) deriving Show
 
 type RecordName  = String
-data RecordType  = SOA | NS | MX | A | TXT | SRV | CNAME | PTR deriving (Show, Eq)
-data RecordValue = Name String
+data RecordType  = SOA | NS | MX | A | AAAA | TXT | SRV | CNAME | PTR deriving (Show, Eq)
+type DomainName  = String
+data RecordValue = Name DomainName
                  | IPv4 String
+                 | IPv6 String
                  | StringValue String
                  | MailExchange Int String
                  | Service Int Int Int String
+                 | ServerAuthority DomainName DomainName Serial Refresh Retry Expire Minimum
+                 deriving Show
+
+type Serial  = Int
+type Refresh = Int
+type Retry   = Int
+type Expire  = Int
+type Minimum = Int
 
 type TTL = Int
 data Class = IN | CS | CH | HS deriving Show
@@ -84,23 +96,28 @@ prettyShowRecordType SOA   = "SOA  "
 prettyShowRecordType NS    = "NS   "
 prettyShowRecordType MX    = "MX   "
 prettyShowRecordType A     = "A    "
+prettyShowRecordType AAAA  = "AAAA "
 prettyShowRecordType TXT   = "TXT  "
 prettyShowRecordType SRV   = "SRV  "
 prettyShowRecordType CNAME = "CNAME"
 prettyShowRecordType PTR   = "PTR  "
 
-showRecord :: String -> Maybe TTL -> Maybe Class -> RecordType -> RecordValue -> String
-showRecord n (Just tl) (Just cl) t v = unwords [n, show tl, show cl, prettyShowRecordType t, show v]
-showRecord n (Just tl)  Nothing  t v = unwords [n, show tl,    "  ", prettyShowRecordType t, show v]
-showRecord n  Nothing  (Just cl) t v = unwords [n,   "   ", show cl, prettyShowRecordType t, show v]
-showRecord n  Nothing   Nothing  t v = unwords [n,   "   ",    "  ", prettyShowRecordType t, show v]
+prettyShowRecordValue :: RecordValue -> String
+prettyShowRecordValue (Name s)             = s
+prettyShowRecordValue (IPv4 s)             = s
+prettyShowRecordValue (IPv6 s)             = s
+prettyShowRecordValue (StringValue s)      = s
+prettyShowRecordValue (MailExchange p v)   = unwords [show p, v]
+prettyShowRecordValue (Service i1 i2 i3 v) = unwords [show i1, show i2, show i3, v]
+prettyShowRecordValue (ServerAuthority n1 n2 i1 i2 i3 i4 i5) =
+  unwords [n1, n2] ++ " (" ++ unwords [show i1, show i2, show i3, show i4, show i5] ++ ")"
 
-instance Show RecordValue where
-  show (Name s) = s
-  show (IPv4 s) = s
-  show (Service i1 i2 i3 v) = unwords [show i1, show i2, show i3, v]
-  show (MailExchange p v) = unwords [show p, v]
-  show (StringValue s) = s
+showRecord :: String -> Maybe TTL -> Maybe Class -> RecordType -> RecordValue -> String
+showRecord n tl cl t v = unwords [n, tl', cl', t', v']
+  where tl' = maybe "   " show tl
+        cl' = maybe  "  " show cl
+        t'  = prettyShowRecordType t
+        v'  = prettyShowRecordValue v
 
 readZone :: FilePath -> IO (Either String Zone)
 readZone file = fmap simplifyZone . readMessage . parse zoneParser "" <$> readFile file
@@ -124,9 +141,9 @@ int = read <$> many1 digit
 
 class' :: Parser Class
 class' = tries [ "IN" ~> IN
-               , "CS" ~> CS
-               , "CH" ~> CH
-               , "HS" ~> HS
+               , "CS" ~> CS -- TODO implement / raise ?
+               , "CH" ~> CH -- TODO implement / raise ?
+               , "HS" ~> HS -- TODO implement / raise ?
                ]
 
 record :: Parser (Maybe Record)
@@ -136,21 +153,27 @@ record = tries [ Nothing <$ manyTill space endOfLine
 
 record' :: Parser Record
 record' = do
-  n <- tries [ Nothing <$  space <* spaces
-             , Just    <$> recordName <* inlineSpaces1
-             ]
-  (mttl, cl) <- tries [ (,)      <$> maybeTtl   <*> maybeClass
-                      , flip (,) <$> maybeClass <*> maybeTtl
-                      ]
-  t    <- recordType    <* inlineSpaces1
-  v    <- recordValue t
-  return $ case n of Just en -> Explicit en  t v mttl cl
-                     Nothing -> Continuation t v mttl cl
-    where maybeTtl = optionMaybe (ttl <* inlineSpaces1)
-          maybeClass = optionMaybe (class' <* inlineSpaces1)
+  n <- nature
+  (mttl, cl) <- ttlAndClass
+  t <- recordType <* inlineSpaces1
+  v <- recordValue t
+  return (mkRecord n t v mttl cl)
+    where nature = tries [ Nothing <$  space <* spaces
+                         , Just    <$> recordName <* inlineSpaces1
+                         ]
+          maybeTtl    = optionMaybe (ttl <* inlineSpaces1)
+          maybeClass  = optionMaybe (class' <* inlineSpaces1)
+          ttlAndClass = tries [ (,)      <$> maybeTtl   <*> maybeClass
+                              , flip (,) <$> maybeClass <*> maybeTtl
+                              ]
+          mkRecord (Just en) = Explicit en
+          mkRecord  Nothing  = Continuation
 
 inlineSpaces1 :: Parser String
 inlineSpaces1 = many1 inlineSpace
+
+inlineSpaces :: Parser String
+inlineSpaces = many inlineSpace
 
 inlineSpace :: Parser Char
 inlineSpace = satisfy (\ c -> isSpace c && not (isNewline c))
@@ -164,6 +187,7 @@ recordType :: Parser RecordType
 recordType = tries [ "SOA"   ~> SOA
                    , "NS"    ~> NS
                    , "MX"    ~> MX
+                   , "AAAA"  ~> AAAA
                    , "A"     ~> A
                    , "TXT"   ~> TXT
                    , "SRV"   ~> SRV
@@ -177,10 +201,48 @@ s ~> v = v <$ string s
 tries :: [Parser a] -> Parser a
 tries = choice . map try
 
+dot :: Parser String
+dot = string "."
+
+byte :: Parser String
+byte = do
+  i <- int
+  guard (i >= 0 && i <= 255)
+  return (show i)
+
+ipv4 :: Parser String
+ipv4 = sentence [byte, dot, byte, dot, byte, dot, byte]
+
+ipv6 :: Parser String
+ipv6 = intercalate "::" <$> parts
+  where colon = string ":"
+        singleColon = colon !> colon
+        doubleColon = string "::"
+        doubleByte = many1 hexDigit
+        bytes = doubleByte `sepBy1` singleColon
+        part = intercalate ":" <$> bytes
+        parts = atMost 2 $ part `sepBy1` doubleColon
+
+atMost :: Int -> Parser [a] -> Parser [a]
+atMost most p = do
+  v <- p
+  guard (length v <= most)
+  return v
+
+(!>) :: Show b => Parser a -> Parser b -> Parser a
+p !> failure = try $ do
+  v <- p
+  notFollowedBy failure
+  return v
+
+sentence :: [Parser String] -> Parser String
+sentence = fmap concat . sequence
+
 recordValue :: RecordType -> Parser RecordValue
-recordValue A     = IPv4 <$> text
-recordValue CNAME = Name <$> text
-recordValue PTR   = Name <$> text
+recordValue A     = IPv4 <$> ipv4
+recordValue AAAA  = IPv6 <$> ipv6
+recordValue CNAME = Name <$> domainName
+recordValue PTR   = Name <$> domainName
 recordValue NS    = Name <$> text
 recordValue MX    = MailExchange <$> int <* inlineSpaces1
                                  <*> text
@@ -188,7 +250,19 @@ recordValue SRV   = Service <$> int <* inlineSpaces1
                             <*> int <* inlineSpaces1
                             <*> int <* inlineSpaces1
                             <*> text
+recordValue SOA   = ServerAuthority <$> (inlineSpaces *> domainName <* spaces)
+                                    <*> domainName <* spaces
+                                    <*  try (optional (char '(' <* inlineSpaces))
+                                    <*> int <* inlineSpaces1
+                                    <*> int <* inlineSpaces1
+                                    <*> int <* inlineSpaces1
+                                    <*> int <* inlineSpaces1
+                                    <*> int
+                                    <*  try (optional (inlineSpaces <* char ')'))
 recordValue _     = StringValue <$> text
+
+domainName :: Parser DomainName
+domainName = anyChar `manyTill` space -- TODO see https://tools.ietf.org/html/rfc1034
 
 text :: Parser String
 text = manyTill anyChar (() <$ endOfLine <|> eof)
