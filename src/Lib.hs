@@ -3,8 +3,8 @@ module Lib
     , printZone
     , query
     , Query
-    , Record
-    , Zone
+    , Record(..)
+    , Zone(..)
     , mxRecords
     , cnameRecords
     , aRecords
@@ -12,9 +12,11 @@ module Lib
     , ofType
     ) where
 
-import Control.Monad (guard)
+import Control.Monad (guard, (>=>))
+
 import Data.Char     (isSpace)
 import Data.List     (intercalate)
+import Data.List.Zipper
 import Data.Maybe    (catMaybes)
 
 import Text.Parsec
@@ -30,10 +32,42 @@ printZone (Zone mtl records) = intercalate "\n" formattedLines
         nameLength (Explicit n _ _ _ _) = length n
         nameLength _ = 0
 
+groupExplicits :: [Record] -> [Record]
+groupExplicits []  = []
+groupExplicits [r] = [r]
+groupExplicits rs  = concatInPlace (thruZipper groupZip) rs
+  where thruZipper    f = toList . f . fromList
+        concatInPlace f = concat . f . map (:[])
+
+groupZip :: Zipper [Record] -> Zipper [Record]
+groupZip z | beginp z = groupZip $ right z
+           | endp z = z
+           | otherwise = groupZip . reduceLeft $ z
+
+reduceLeft :: Zipper [Record] -> Zipper [Record]
+reduceLeft z =
+  case cursor z of
+    e@(Explicit n _ _ _ _ : _) | z `preceededByName` n -> appendLeft (toContinuation e) z
+                               | otherwise             -> right z
+    c@(Continuation {} : _) -> appendLeft c z
+    []                      -> delete z
+    where z' `preceededByName` n = predName z' == Just n
+          predName = safeCursor . left >=> name
+          name (Explicit n _ _ _ _ : _) = Just n
+          name _                        = Nothing
+
+appendLeft :: [a] -> Zipper [a] -> Zipper [a]
+appendLeft c = delete . right . transform (++ c) . left
+  where transform f z = replace (f (cursor z)) z
+
+toContinuation :: [Record] -> [Record]
+toContinuation (Explicit _ t v tl cl : rs) = Continuation t v tl cl : rs
+toContinuation rs = rs
+
 simplifyZone :: Zone -> Zone
-simplifyZone (Zone mtl []) = Zone mtl []
-simplifyZone (Zone mtl [r]) = Zone mtl [r]
-simplifyZone (Zone mtl (r:rs)) = Zone mtl (r:rs')
+simplifyZone (Zone mtl [])     = Zone mtl []
+simplifyZone (Zone mtl [r])    = Zone mtl [r]
+simplifyZone (Zone mtl (r:rs)) = Zone mtl (groupExplicits (r:rs'))
   where rs' = map shrinkClass rs
         shrinkClass (Explicit     n t v tl _) = Explicit     n t v tl Nothing
         shrinkClass (Continuation   t v tl _) = Continuation   t v tl Nothing
