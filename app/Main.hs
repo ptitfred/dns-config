@@ -13,7 +13,7 @@ main :: IO ()
 main = getArgs >>= dispatch
 
 dispatch :: [String] -> IO ()
-dispatch ("clean" : [])       = cleanZone stdin
+dispatch ["clean"]            = cleanZone stdin
 dispatch ("clean" : "-"  : _) = cleanZone stdin
 dispatch ("clean" : file : _) = cleanZone file
 dispatch  _                  = help

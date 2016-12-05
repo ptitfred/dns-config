@@ -124,7 +124,7 @@ readZone file = fmap simplifyZone . readMessage . parse zoneParser "" <$> readFi
 
 readMessage :: Either ParseError a -> Either String a
 readMessage (Left pe) = Left (show pe)
-readMessage (Right r) = (Right r)
+readMessage (Right r) = Right r
 
 zoneParser :: Parser Zone
 zoneParser = Zone <$> globalTtl
